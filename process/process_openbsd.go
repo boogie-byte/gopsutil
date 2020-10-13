@@ -4,21 +4,20 @@ package process
 
 import (
 	"C"
-	"bytes"
 	"context"
-	"encoding/binary"
 	"os/exec"
-	"path/filepath"
+
 	"strconv"
 	"strings"
 	"unsafe"
 
 	cpu "github.com/shirou/gopsutil/cpu"
 	"github.com/shirou/gopsutil/internal/common"
+	"github.com/shirou/gopsutil/internal/libkvm"
 	mem "github.com/shirou/gopsutil/mem"
 	net "github.com/shirou/gopsutil/net"
-	"golang.org/x/sys/unix"
 )
+import "path/filepath"
 
 // MemoryInfoExStat is different between OSes
 type MemoryInfoExStat struct {
@@ -46,23 +45,23 @@ func (p *Process) Ppid() (int32, error) {
 }
 
 func (p *Process) PpidWithContext(ctx context.Context) (int32, error) {
-	k, err := p.getKProc()
+	k, err := libkvm.GetProcs(p.Pid)
 	if err != nil {
 		return 0, err
 	}
 
-	return k.Ppid, nil
+	return k[0].Ppid, nil
 }
 func (p *Process) Name() (string, error) {
 	return p.NameWithContext(context.Background())
 }
 
 func (p *Process) NameWithContext(ctx context.Context) (string, error) {
-	k, err := p.getKProc()
+	k, err := libkvm.GetProcs(p.Pid)
 	if err != nil {
 		return "", err
 	}
-	name := common.IntToString(k.Comm[:])
+	name := k[0].Comm
 
 	if len(name) >= 15 {
 		cmdlineSlice, err := p.CmdlineSliceWithContext(ctx)
@@ -153,25 +152,12 @@ func (p *Process) Status() (string, error) {
 }
 
 func (p *Process) StatusWithContext(ctx context.Context) (string, error) {
-	k, err := p.getKProc()
+	k, err := libkvm.GetProcs(p.Pid)
 	if err != nil {
 		return "", err
 	}
-	var s string
-	switch k.Stat {
-	case SIDL:
-	case SRUN:
-	case SONPROC:
-		s = "R"
-	case SSLEEP:
-		s = "S"
-	case SSTOP:
-		s = "T"
-	case SDEAD:
-		s = "Z"
-	}
 
-	return s, nil
+	return k[0].Stat, nil
 }
 func (p *Process) Foreground() (bool, error) {
 	return p.ForegroundWithContext(context.Background())
@@ -195,69 +181,65 @@ func (p *Process) Uids() ([]int32, error) {
 }
 
 func (p *Process) UidsWithContext(ctx context.Context) ([]int32, error) {
-	k, err := p.getKProc()
+	k, err := libkvm.GetProcs(p.Pid)
 	if err != nil {
 		return nil, err
 	}
 
-	uids := make([]int32, 0, 3)
-
-	uids = append(uids, int32(k.Ruid), int32(k.Uid), int32(k.Svuid))
-
-	return uids, nil
+	return []int32{int32(k[0].Ruid), int32(k[0].Uid), int32(k[0].Svuid)}, nil
 }
 func (p *Process) Gids() ([]int32, error) {
 	return p.GidsWithContext(context.Background())
 }
 
 func (p *Process) GidsWithContext(ctx context.Context) ([]int32, error) {
-	k, err := p.getKProc()
+	k, err := libkvm.GetProcs(p.Pid)
 	if err != nil {
 		return nil, err
 	}
 
-	gids := make([]int32, 0, 3)
-	gids = append(gids, int32(k.Rgid), int32(k.Ngroups), int32(k.Svgid))
-
-	return gids, nil
+	return []int32{int32(k[0].Rgid), int32(k[0].Gid), int32(k[0].Svgid)}, nil
 }
 func (p *Process) GroupsWithContext(ctx context.Context) ([]int32, error) {
-	k, err := p.getKProc()
+	k, err := libkvm.GetProcs(p.Pid)
 	if err != nil {
 		return nil, err
 	}
 
-	return k.Groups, nil
+	var groups []int32
+	for _, g := range k[0].Groups {
+		groups = append(groups, int32(g))
+	}
+
+	return groups, nil
 }
 func (p *Process) Terminal() (string, error) {
 	return p.TerminalWithContext(context.Background())
 }
 
 func (p *Process) TerminalWithContext(ctx context.Context) (string, error) {
-	k, err := p.getKProc()
+	k, err := libkvm.GetProcs(p.Pid)
 	if err != nil {
 		return "", err
 	}
-
-	ttyNr := uint64(k.Tdev)
 
 	termmap, err := getTerminalMap()
 	if err != nil {
 		return "", err
 	}
 
-	return termmap[ttyNr], nil
+	return termmap[uint64(k[0].Tdev)], nil
 }
 func (p *Process) Nice() (int32, error) {
 	return p.NiceWithContext(context.Background())
 }
 
 func (p *Process) NiceWithContext(ctx context.Context) (int32, error) {
-	k, err := p.getKProc()
+	k, err := libkvm.GetProcs(p.Pid)
 	if err != nil {
 		return 0, err
 	}
-	return int32(k.Nice), nil
+	return int32(k[0].Nice), nil
 }
 func (p *Process) IOnice() (int32, error) {
 	return p.IOniceWithContext(context.Background())
@@ -287,13 +269,13 @@ func (p *Process) IOCounters() (*IOCountersStat, error) {
 }
 
 func (p *Process) IOCountersWithContext(ctx context.Context) (*IOCountersStat, error) {
-	k, err := p.getKProc()
+	k, err := libkvm.GetProcs(p.Pid)
 	if err != nil {
 		return nil, err
 	}
 	return &IOCountersStat{
-		ReadCount:  uint64(k.Uru_inblock),
-		WriteCount: uint64(k.Uru_oublock),
+		ReadCount:  k[0].Uru_inblock,
+		WriteCount: k[0].Uru_oublock,
 	}, nil
 }
 func (p *Process) NumCtxSwitches() (*NumCtxSwitchesStat, error) {
@@ -331,14 +313,15 @@ func (p *Process) Times() (*cpu.TimesStat, error) {
 }
 
 func (p *Process) TimesWithContext(ctx context.Context) (*cpu.TimesStat, error) {
-	k, err := p.getKProc()
+	k, err := libkvm.GetProcs(p.Pid)
 	if err != nil {
 		return nil, err
 	}
+
 	return &cpu.TimesStat{
 		CPU:    "cpu",
-		User:   float64(k.Uutime_sec) + float64(k.Uutime_usec)/1000000,
-		System: float64(k.Ustime_sec) + float64(k.Ustime_usec)/1000000,
+		User:   float64(k[0].Uutime_sec) + float64(k[0].Uutime_usec)/1000000,
+		System: float64(k[0].Ustime_sec) + float64(k[0].Ustime_usec)/1000000,
 	}, nil
 }
 func (p *Process) CPUAffinity() ([]int32, error) {
@@ -353,19 +336,20 @@ func (p *Process) MemoryInfo() (*MemoryInfoStat, error) {
 }
 
 func (p *Process) MemoryInfoWithContext(ctx context.Context) (*MemoryInfoStat, error) {
-	k, err := p.getKProc()
+	k, err := libkvm.GetProcs(p.Pid)
 	if err != nil {
 		return nil, err
 	}
+
 	pageSize, err := mem.GetPageSize()
 	if err != nil {
 		return nil, err
 	}
 
 	return &MemoryInfoStat{
-		RSS: uint64(k.Vm_rssize) * pageSize,
-		VMS: uint64(k.Vm_tsize) + uint64(k.Vm_dsize) +
-			uint64(k.Vm_ssize),
+		RSS: uint64(k[0].Vm_rssize) * pageSize,
+		VMS: uint64(k[0].Vm_tsize) + uint64(k[0].Vm_dsize) +
+			uint64(k[0].Vm_ssize),
 	}, nil
 }
 func (p *Process) MemoryInfoEx() (*MemoryInfoExStat, error) {
@@ -450,25 +434,14 @@ func Processes() ([]*Process, error) {
 }
 
 func ProcessesWithContext(ctx context.Context) ([]*Process, error) {
-	results := []*Process{}
-
-	buf, length, err := CallKernProcSyscall(KernProcAll, 0)
-
+	k, err := libkvm.GetProcs(0)
 	if err != nil {
-		return results, err
+		return nil, err
 	}
 
-	// get kinfo_proc size
-	count := int(length / uint64(sizeOfKinfoProc))
-
-	// parse buf to procs
-	for i := 0; i < count; i++ {
-		b := buf[i*sizeOfKinfoProc : (i+1)*sizeOfKinfoProc]
-		k, err := parseKinfoProc(b)
-		if err != nil {
-			continue
-		}
-		p, err := NewProcess(int32(k.Pid))
+	var results []*Process
+	for _, pi := range k {
+		p, err := NewProcess(int32(pi.Pid))
 		if err != nil {
 			continue
 		}
@@ -479,71 +452,3 @@ func ProcessesWithContext(ctx context.Context) ([]*Process, error) {
 	return results, nil
 }
 
-func parseKinfoProc(buf []byte) (KinfoProc, error) {
-	var k KinfoProc
-	br := bytes.NewReader(buf)
-	err := common.Read(br, binary.LittleEndian, &k)
-	return k, err
-}
-
-func (p *Process) getKProc() (*KinfoProc, error) {
-	return p.getKProcWithContext(context.Background())
-}
-
-func (p *Process) getKProcWithContext(ctx context.Context) (*KinfoProc, error) {
-	buf, length, err := CallKernProcSyscall(KernProcPID, p.Pid)
-	if err != nil {
-		return nil, err
-	}
-	if length != sizeOfKinfoProc {
-		return nil, err
-	}
-
-	k, err := parseKinfoProc(buf)
-	if err != nil {
-		return nil, err
-	}
-	return &k, nil
-}
-
-func CallKernProcSyscall(op int32, arg int32) ([]byte, uint64, error) {
-	return CallKernProcSyscallWithContext(context.Background(), op, arg)
-}
-
-func CallKernProcSyscallWithContext(ctx context.Context, op int32, arg int32) ([]byte, uint64, error) {
-	mib := []int32{CTLKern, KernProc, op, arg, sizeOfKinfoProc, 0}
-	mibptr := unsafe.Pointer(&mib[0])
-	miblen := uint64(len(mib))
-	length := uint64(0)
-	_, _, err := unix.Syscall6(
-		unix.SYS___SYSCTL,
-		uintptr(mibptr),
-		uintptr(miblen),
-		0,
-		uintptr(unsafe.Pointer(&length)),
-		0,
-		0)
-	if err != 0 {
-		return nil, length, err
-	}
-
-	count := int32(length / uint64(sizeOfKinfoProc))
-	mib = []int32{CTLKern, KernProc, op, arg, sizeOfKinfoProc, count}
-	mibptr = unsafe.Pointer(&mib[0])
-	miblen = uint64(len(mib))
-	// get proc info itself
-	buf := make([]byte, length)
-	_, _, err = unix.Syscall6(
-		unix.SYS___SYSCTL,
-		uintptr(mibptr),
-		uintptr(miblen),
-		uintptr(unsafe.Pointer(&buf[0])),
-		uintptr(unsafe.Pointer(&length)),
-		0,
-		0)
-	if err != 0 {
-		return buf, length, err
-	}
-
-	return buf, length, nil
-}
