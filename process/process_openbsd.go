@@ -3,13 +3,11 @@
 package process
 
 import (
-	"C"
 	"context"
 	"os/exec"
 
 	"strconv"
 	"strings"
-	"unsafe"
 
 	cpu "github.com/shirou/gopsutil/cpu"
 	"github.com/shirou/gopsutil/internal/common"
@@ -96,26 +94,7 @@ func (p *Process) CmdlineSlice() ([]string, error) {
 }
 
 func (p *Process) CmdlineSliceWithContext(ctx context.Context) ([]string, error) {
-	mib := []int32{CTLKern, KernProcArgs, p.Pid, KernProcArgv}
-	buf, _, err := common.CallSyscall(mib)
-
-	if err != nil {
-		return nil, err
-	}
-
-	argc := 0
-	argvp := unsafe.Pointer(&buf[0])
-	argv := *(**C.char)(unsafe.Pointer(argvp))
-	size := unsafe.Sizeof(argv)
-	var strParts []string
-
-	for argv != nil {
-		strParts = append(strParts, C.GoString(argv))
-
-		argc++
-		argv = *(**C.char)(unsafe.Pointer(uintptr(argvp) + uintptr(argc)*size))
-	}
-	return strParts, nil
+	return libkvm.GetArgv(p.Pid)
 }
 
 func (p *Process) Cmdline() (string, error) {
@@ -373,18 +352,25 @@ func (p *Process) Children() ([]*Process, error) {
 }
 
 func (p *Process) ChildrenWithContext(ctx context.Context) ([]*Process, error) {
-	pids, err := common.CallPgrepWithContext(ctx, invoke, p.Pid)
+	k, err := libkvm.GetProcs(p.Pid)
 	if err != nil {
 		return nil, err
 	}
-	ret := make([]*Process, 0, len(pids))
-	for _, pid := range pids {
-		np, err := NewProcess(pid)
+
+	var ret []*Process
+	for _, pi := range k {
+		if pi.Ppid != p.Pid {
+			continue
+		}
+
+		np, err := NewProcess(pi.Pid)
 		if err != nil {
 			return nil, err
 		}
+
 		ret = append(ret, np)
 	}
+
 	return ret, nil
 }
 
@@ -451,4 +437,3 @@ func ProcessesWithContext(ctx context.Context) ([]*Process, error) {
 
 	return results, nil
 }
-
