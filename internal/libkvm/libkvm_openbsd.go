@@ -18,10 +18,15 @@ __openfiles(char *errbuf){
     return kvm_openfiles(NULL,NULL,NULL,KVM_NO_FILES,errbuf);
 }
 
-// Helper function for easy array value retrieval
+// Helper functions for easy array values retrieval
 char *
-__arr_elem(char **vec, uint offset){
+__str_arr_elem(char **vec, int offset){
     return *(vec + offset);
+}
+
+struct kinfo_proc*
+__proc_arr_elem(struct kinfo_proc *kp, int offset){
+    return kp + sizeof(struct kinfo_proc)*offset;
 }
 */
 import "C"
@@ -72,7 +77,7 @@ func getKernD() (*C.struct___kvm, error) {
 	return kd, nil
 }
 
-func getProcs(kd *C.struct___kvm, arg int32) (*C.struct_kinfo_proc, int, error) {
+func getProcs(kd *C.struct___kvm, arg int32) (*C.struct_kinfo_proc, C.int, error) {
 	// Get kproc_info array
 	cArg := C.int(arg)
 	var cnt C.int // kp length
@@ -83,15 +88,15 @@ func getProcs(kd *C.struct___kvm, arg int32) (*C.struct_kinfo_proc, int, error) 
 		return nil, 0, fmt.Errorf(errStr)
 	}
 
-	return kp, int(cnt), nil
+	return kp, cnt, nil
 }
 
 func readStrVec(vec **C.char) []string {
 	var ret []string
 
-	offset := C.uint(0)
+	offset := C.int(0)
 	for {
-		strPtr := C.__arr_elem(vec, offset)
+		strPtr := C.__str_arr_elem(vec, offset)
 		if strPtr == nil {
 			break
 		}
@@ -117,10 +122,8 @@ func GetProcs(arg int32) ([]*ProcInfo, error) {
 	}
 
 	var res []*ProcInfo
-	for i := 0; i < count; i++ {
-		base := uintptr(unsafe.Pointer(kpArray))
-		offset := uintptr(C.sizeof_struct_kinfo_proc * i)
-		kp := (*C.struct_kinfo_proc)(unsafe.Pointer(base + offset))
+	for i := C.int(0); i < count; i++ {
+		kp := C.__proc_arr_elem(kpArray, i)
 
 		pi := &ProcInfo{
 			Pid:         int32(kp.p_pid),
