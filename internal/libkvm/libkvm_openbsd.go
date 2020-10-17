@@ -9,6 +9,10 @@ package libkvm
 #include <sys/proc.h>
 #include <sys/sysctl.h>
 
+enum {
+	sizeOfPtr = sizeof(void*),
+};
+
 // This wrapper is needed in order to pass KVM_NO_FILES to
 // the kvm_openfiles function. It cannot be done via Cgo since
 // C.int type is hardcoded to be 4 bytes long, and KVM_NO_FILES
@@ -21,6 +25,7 @@ __openfiles(char *errbuf){
 import "C"
 
 import (
+	"encoding/binary"
 	"fmt"
 	"strings"
 	"unsafe"
@@ -52,7 +57,7 @@ type ProcInfo struct {
 	Vm_ssize    int32
 }
 
-func GetProcs(arg int32) ([]*ProcInfo, error) {
+func getKernD() (*C.struct___kvm, error) {
 	// Initialize error message buffer for kvm_openfiles
 	errbuf := C.CString(strings.Repeat("\x00", C._POSIX2_LINE_MAX))
 	defer C.free(unsafe.Pointer(errbuf))
@@ -62,20 +67,68 @@ func GetProcs(arg int32) ([]*ProcInfo, error) {
 	if kd == nil {
 		return nil, fmt.Errorf(C.GoString(errbuf))
 	}
-	defer C.kvm_close(kd)
 
+	return kd, nil
+}
+
+func getProcs(kd *C.struct___kvm, arg int32) (*C.struct_kinfo_proc, int, error) {
 	// Get kproc_info array
 	cArg := C.int(arg)
 	var cnt C.int // kp length
-	kpArray := C.kvm_getprocs(kd, C.KERN_PROC_ALL, cArg, C.sizeof_struct_kinfo_proc, &cnt)
-	if kpArray == nil {
+	kp := C.kvm_getprocs(kd, C.KERN_PROC_ALL, cArg, C.sizeof_struct_kinfo_proc, &cnt)
+	if kp == nil {
 		cErrStr := C.kvm_geterr(kd)
 		errStr := C.GoString(cErrStr)
-		return nil, fmt.Errorf(errStr)
+		return nil, 0, fmt.Errorf(errStr)
+	}
+
+	return kp, int(cnt), nil
+}
+
+func readStrVec(vec **C.char) []string {
+	var ret []string
+	var strPtr uintptr
+	vecPtr := unsafe.Pointer(vec)
+	for {
+		buf := C.GoBytes(vecPtr, C.sizeOfPtr)
+
+		switch C.sizeOfPtr {
+		case 4:
+			p := binary.LittleEndian.Uint32(buf)
+			strPtr = uintptr(p)
+		case 8:
+			p := binary.LittleEndian.Uint64(buf)
+			strPtr = uintptr(p)
+		default:
+			panic("unsupported pointer size")
+		}
+
+		if strPtr == 0 {
+			break
+		}
+
+		str := C.GoString((*C.char)(unsafe.Pointer(strPtr)))
+		ret = append(ret, str)
+
+		vecPtr = unsafe.Pointer(uintptr(vecPtr) + uintptr(C.sizeOfPtr))
+	}
+
+	return ret
+}
+
+func GetProcs(arg int32) ([]*ProcInfo, error) {
+	kd, err := getKernD()
+	if err != nil {
+		return nil, err
+	}
+	defer C.kvm_close(kd)
+
+	kpArray, count, err := getProcs(kd, arg)
+	if err != nil {
+		return nil, err
 	}
 
 	var res []*ProcInfo
-	count := int(cnt)
 	for i := 0; i < count; i++ {
 		base := uintptr(unsafe.Pointer(kpArray))
 		offset := uintptr(C.sizeof_struct_kinfo_proc * i)
@@ -126,4 +179,36 @@ func GetProcs(arg int32) ([]*ProcInfo, error) {
 	}
 
 	return res, nil
+}
+
+func GetArgv(arg int32) ([]string, error) {
+	kd, err := getKernD()
+	if err != nil {
+		return nil, err
+	}
+	defer C.kvm_close(kd)
+
+	kp, _, err := getProcs(kd, arg)
+	if err != nil {
+		return nil, err
+	}
+
+	argv := C.kvm_getargv(kd, kp, 0)
+	return readStrVec(argv), nil
+}
+
+func GetEnvv(arg int32) ([]string, error) {
+	kd, err := getKernD()
+	if err != nil {
+		return nil, err
+	}
+	defer C.kvm_close(kd)
+
+	kp, _, err := getProcs(kd, arg)
+	if err != nil {
+		return nil, err
+	}
+
+	argv := C.kvm_getenvv(kd, kp, 0)
+	return readStrVec(argv), nil
 }
