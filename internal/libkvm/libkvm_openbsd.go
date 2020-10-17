@@ -9,10 +9,6 @@ package libkvm
 #include <sys/proc.h>
 #include <sys/sysctl.h>
 
-enum {
-	sizeOfPtr = sizeof(void*),
-};
-
 // This wrapper is needed in order to pass KVM_NO_FILES to
 // the kvm_openfiles function. It cannot be done via Cgo since
 // C.int type is hardcoded to be 4 bytes long, and KVM_NO_FILES
@@ -21,27 +17,33 @@ kvm_t *
 __openfiles(char *errbuf){
     return kvm_openfiles(NULL,NULL,NULL,KVM_NO_FILES,errbuf);
 }
+
+// Helper function for easy array value retrieval
+char *
+__arr_elem(char **vec, uint offset){
+    return *(vec + offset);
+}
 */
 import "C"
 
 import (
-	"encoding/binary"
 	"fmt"
 	"strings"
 	"unsafe"
 )
 
 type ProcInfo struct {
+	Comm        string
 	Pid         int32
 	Ppid        int32
 	Stat        string
 	Uid         uint32
 	Ruid        uint32
+	Svuid       uint32
 	Gid         uint32
 	Rgid        uint32
-	Groups      []uint32
-	Svuid       uint32
 	Svgid       uint32
+	Groups      []uint32
 	Tdev        uint32
 	Nice        uint8
 	Uru_inblock uint64
@@ -50,7 +52,6 @@ type ProcInfo struct {
 	Uutime_usec uint32
 	Ustime_sec  uint32
 	Ustime_usec uint32
-	Comm        string
 	Vm_rssize   int32
 	Vm_tsize    int32
 	Vm_dsize    int32
@@ -87,30 +88,17 @@ func getProcs(kd *C.struct___kvm, arg int32) (*C.struct_kinfo_proc, int, error) 
 
 func readStrVec(vec **C.char) []string {
 	var ret []string
-	var strPtr uintptr
-	vecPtr := unsafe.Pointer(vec)
+
+	offset := C.uint(0)
 	for {
-		buf := C.GoBytes(vecPtr, C.sizeOfPtr)
-
-		switch C.sizeOfPtr {
-		case 4:
-			p := binary.LittleEndian.Uint32(buf)
-			strPtr = uintptr(p)
-		case 8:
-			p := binary.LittleEndian.Uint64(buf)
-			strPtr = uintptr(p)
-		default:
-			panic("unsupported pointer size")
-		}
-
-		if strPtr == 0 {
+		strPtr := C.__arr_elem(vec, offset)
+		if strPtr == nil {
 			break
 		}
 
-		str := C.GoString((*C.char)(unsafe.Pointer(strPtr)))
+		str := C.GoString(strPtr)
 		ret = append(ret, str)
-
-		vecPtr = unsafe.Pointer(uintptr(vecPtr) + uintptr(C.sizeOfPtr))
+		offset++
 	}
 
 	return ret
